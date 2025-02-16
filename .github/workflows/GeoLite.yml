@@ -27,7 +27,7 @@
 # SOFTWARE.
 #
 
-name: Publish GeoLite.mmdb
+name: Publish JP IP
 
 on:
   repository_dispatch:
@@ -36,21 +36,41 @@ on:
     - cron: 0 1 */3 * *
 
 jobs:
-  run:
+  process:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
 
     steps:
-    - name: Download GeoLite.mmdb
+    - name: Set up environment
       run: |
-        wget -nv -O- "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=${{ secrets.LICENSE_KEY }}&suffix=tar.gz" | tar zxv
-        wget -nv -O- "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key=${{ secrets.LICENSE_KEY }}&suffix=tar.gz" | tar zxv
-        wget -nv -O- "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=${{ secrets.LICENSE_KEY }}&suffix=tar.gz" | tar zxv
-        mkdir -p upload
-        cp -v GeoLite*/*.mmdb upload
+        sudo curl -Ls https://github.com/ipinfo/mmdbctl/releases/download/mmdbctl-1.4.7/deb.sh | sudo sh
+        sudo apt-get install -y jq
         echo "TAG_NAME=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
 
-    - name: Push to "download" branch
+    - name: Download GeoLite2 Database
+      run: |
+        curl -L -o GeoLite2-Country.mmdb \
+        "https://github.com/P3TERX/GeoLite.mmdb/raw/refs/heads/download/GeoLite2-Country.mmdb"
+
+    - name: Export to JSON
+      run: mmdbctl export GeoLite2-Country.mmdb -f json --no-header true -o GeoLite2-Country.json
+
+    - name: Process JSON Data
+      run: |
+        # 提取日本 IPv4 CIDR
+        jq -r '
+          select(
+            (.country?.iso_code? == "JP") or 
+            (.registered_country?.iso_code? == "JP")
+          ) |
+          select(.range | contains(".")) |
+          .range
+        ' GeoLite2-Country.json | sort -u > jp-cidr.txt
+
+        # 分割文件并创建目录
+        mkdir -p upload
+        split -d -l 900 jp-cidr.txt upload/jp-list- --additional-suffix=.txt
+
+    - name: Commit to download branch
       run: |
         cd upload
         git init
@@ -58,9 +78,11 @@ jobs:
         git config user.email "${{ github.actor }}@users.noreply.github.com"
         git checkout -b download
         git add .
-        git commit -m "${{ env.TAG_NAME }}"
-        git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+        git commit -m "Japan CIDR update $(date +'%Y-%m-%d')"
+        git remote add origin \
+          "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
         git push -f origin download
+
 
     - name: Upload to Releases
       uses: softprops/action-gh-release@v2
@@ -69,7 +91,7 @@ jobs:
       with:
         tag_name: ${{ env.TAG_NAME }}
         body: ${{ env.TAG_NAME }}
-        files: upload/*.mmdb
+        files: upload/*.txt
 
     - name: Remove old Releases
       uses: dev-drprasad/delete-older-releases@master
